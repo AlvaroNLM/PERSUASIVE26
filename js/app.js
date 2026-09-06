@@ -708,7 +708,7 @@ function finished() {
 
       <div class="card">
         <h2>
-          Your submission has been sent.
+          Your responses were submitted successfully.
         </h2>
 
         <p>
@@ -725,37 +725,6 @@ function finished() {
       </div>
     `
   );
-
-
-  document
-    .querySelector(
-      '#retry-submission'
-    )
-    .onclick = async event => {
-
-      const button =
-        event.target;
-
-      button.disabled = true;
-
-      try {
-        console.log(
-          'RETRY SUBMISSION PAYLOAD:',
-          session.final_payload
-        );
-
-        await sendSubmission(
-          session.final_payload
-        );
-
-        finished();
-
-      } catch (err) {
-        error(err);
-
-        button.disabled = false;
-      }
-    };
 }
 
 
