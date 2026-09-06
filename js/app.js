@@ -712,21 +712,6 @@ function finished() {
         </h2>
 
         <p>
-          This page cannot confirm whether your responses
-          were saved. You may retry the same submission
-          without creating a duplicate.
-        </p>
-
-        <div class="actions">
-          <button
-            class="secondary"
-            id="retry-submission"
-          >
-            Retry the same submission
-          </button>
-        </div>
-
-        <p>
           Your perspective contributes to research
           on how people interpret AI-assisted information.
           You may now close this page.
