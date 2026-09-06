@@ -1,9 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {classifyProfile, explainClassification, CASE_FEATURES, FEATURE_KEYS} from '../js/classifier.js';
-import {assignCondition} from '../js/experiment.js';
-import {QUESTIONS, questionnaireMarkup} from '../js/questionnaire.js';
+import {classifyProfile, explainClassification} from '../js/classifier.js';
+import {CASE_FEATURES, FEATURE_KEYS} from '../js/case.js';
+import {assignCondition,beginSession,lockPreJudgement} from '../js/experiment.js';
+import {buildSubmissionPayload,sendSubmission} from '../js/submission.js';
+import {createHarness} from './helpers.mjs';
+import {QUESTIONS, questionnaireMarkup, isJudgement} from '../js/questionnaire.js';
 import {saveSession,loadSession,isCompleted,completeSession,checkStorage,SessionStateError} from '../js/storage.js';
 test('fixed stimulus produces the intended assessment and truthful factors',()=>{
  const result=classifyProfile(CASE_FEATURES);
@@ -28,18 +31,22 @@ test('production ignores forced-condition URLs',()=>{
  assert.equal(assignCondition(()=>0.1,'?condition=XAI'),'NO_XAI');
  assert.equal(assignCondition(()=>0.9,'?condition=NO_XAI'),'XAI');
 });
-test('session, assignment and draft survive reload; completion clears draft',()=>{
+test('session, assignment and submission ID survive reload; completion retains retry payload',()=>{
  const entries=new Map(); globalThis.localStorage={setItem:(k,v)=>entries.set(k,String(v)),getItem:k=>entries.get(k)??null,removeItem:k=>entries.delete(k)};
- checkStorage(); const session={participant_id:crypto.randomUUID(),session_id:crypto.randomUUID(),token:crypto.randomUUID(),condition:'XAI',answers:{a1:7},experiment_version:'1.1.0',case_version:'alex_v1',test_mode:false,registered:true,pre_locked:true,pre_ai_judgement:4,post_ai_judgement:null,features:{...CASE_FEATURES},step:'assessment'};
- saveSession(session); assert.deepEqual(loadSession(),session); assert.equal(isCompleted(),false);
- completeSession(); assert.equal(isCompleted(),true); assert.equal(loadSession(),null);
+ checkStorage(); const session=beginSession();const id=session.submission_id;
+ session.step='pre';session.pre_ai_judgement=4;saveSession(session);
+ globalThis.location={search:''};lockPreJudgement(session);
+ assert.deepEqual(loadSession(),session); assert.equal(isCompleted(),false);
+ session.post_ai_judgement=2;session.answers=Object.fromEntries(QUESTIONS.map(([k])=>[k,4]));session.step='questionnaire';
+ session.final_payload=buildSubmissionPayload(session);saveSession(session);
+ completeSession(session); assert.equal(isCompleted(),true);assert.equal(loadSession().submission_id,id);assert.deepEqual(loadSession().final_payload,session.final_payload);
 });
 test('questionnaire has 13 required numeric scales',()=>{
  assert.equal(QUESTIONS.length,13);assert.equal(new Set(QUESTIONS.map(([k])=>k)).size,13);
  const html=questionnaireMarkup({a1:7});assert.equal((html.match(/type="radio"/g)||[]).length,91);assert.equal((html.match(/ required /g)||[]).length,91);
 });
-test('static module imports resolve, including the Pages shared classifier',()=>{
- for(const dir of ['js','supabase/functions/_shared'])for(const file of fs.readdirSync(dir).filter(f=>f.endsWith('.js'))){
+test('static module imports resolve under the Pages subpath',()=>{
+ for(const dir of ['js'])for(const file of fs.readdirSync(dir).filter(f=>f.endsWith('.js'))){
   const source=fs.readFileSync(`${dir}/${file}`,'utf8');
   for(const match of source.matchAll(/from ['"]([^'"]+)['"]/g)) assert.ok(fs.existsSync(new URL(match[1],new URL(`../${dir}/${file}`,import.meta.url))));
  }
@@ -47,7 +54,6 @@ test('static module imports resolve, including the Pages shared classifier',()=>
 });
 
 test('initial judgement validation and corrupt/old storage are explicit',async()=>{
- const {isJudgement}=await import('../supabase/functions/_shared/protocol.js');
  for(const value of [0,8,1.5,'4',null,undefined])assert.equal(isJudgement(value),false);
  for(let i=1;i<=7;i++)assert.equal(isJudgement(i),true);
  for(const raw of ['{broken',JSON.stringify({experiment_version:'1.0.0'}),JSON.stringify({experiment_version:'1.1.0'})]){
@@ -56,174 +62,160 @@ test('initial judgement validation and corrupt/old storage are explicit',async()
  localStorage.removeItem('hci_experiment_v1');
 });
 test('explanation API rejects inconsistent classification',()=>{
- assert.deepEqual(explainClassification(CASE_FEATURES,'ADHD_RELATED'),classifyProfile(CASE_FEATURES).explanationFactors);
- assert.throws(()=>explainClassification(CASE_FEATURES,'ASD_RELATED'));
+ assert.deepEqual(explainClassification(CASE_FEATURES,classifyProfile(CASE_FEATURES)),classifyProfile(CASE_FEATURES).explanationFactors);
+ assert.throws(()=>explainClassification(CASE_FEATURES,{classification:'ASD_RELATED'}));
 });
 
-// The same suite can run its real-browser/database checks with optional external tools.
-const integrationEnabled=Boolean(process.env.TEST_TOOLS_DIR);
-test('Edge Function with real PostgreSQL: locks, validation, RLS and duplicate submissions', {skip:!integrationEnabled}, async()=>{
- const {createHarness}=await import('./helpers.mjs');const h=await createHarness();
- try {
-  const base={participant_id:crypto.randomUUID(),session_id:crypto.randomUUID(),token:crypto.randomUUID(),experiment_version:'1.1.0',case_version:'alex_v1'};
-  assert.equal((await h.call({...base,action:'start',test_mode:true})).status,200);
-  assert.equal((await h.call({...base,action:'start',test_mode:true})).status,200);
-  for(const value of [0,8,1.5,'4',null])assert.equal((await h.call({...base,action:'pre',condition:'XAI',pre_ai_judgement:value})).status,400);
-  assert.equal((await h.call({...base,action:'pre',condition:'OTHER',pre_ai_judgement:4})).status,400);
-  assert.equal((await h.call({...base,action:'pre',condition:'XAI',pre_ai_judgement:5})).status,200);
-  const repeat=await h.call({...base,action:'pre',condition:'NO_XAI',pre_ai_judgement:1});
-  assert.deepEqual(repeat.body,{condition:'XAI',pre_ai_judgement:5});
-  await assert.rejects(h.database.query('update experiment_sessions set pre_ai_judgement=1 where session_id=$1',[base.session_id]));
-  const payload={...base,action:'submit',condition:'XAI',features:{...CASE_FEATURES},answers:Object.fromEntries(QUESTIONS.map(([k])=>[k,4])),classifier_version:'1.0.0',pre_ai_judgement:5,post_ai_judgement:2};
-  for(const key of ['pre_ai_judgement','post_ai_judgement'])for(const value of [0,8,1.5,'4',null])assert.equal((await h.call({...payload,[key]:value})).status,400);
-  assert.equal((await h.call({...payload,pre_ai_judgement:4})).status,400);
-  assert.equal((await h.call({...payload,condition:'NO_XAI'})).status,400);
-  assert.equal((await h.call({...payload,features:{...CASE_FEATURES,distractibility:0}})).status,400);
-  for(const value of [0,8,1.5,'4',null])assert.equal((await h.call({...payload,answers:{...payload.answers,a1:value}})).status,400);
-  assert.equal((await h.call({...payload,token:crypto.randomUUID()})).status,403);
-  assert.equal((await h.call({...payload,raw_ip:'forbidden'})).status,400);
-  const responses=await Promise.all([h.call(payload),h.call(payload)]);assert.ok(responses.every(r=>r.status===200));
-  assert.equal((await h.call(payload)).status,200);
-  const saved=(await h.database.query('select * from experiment_responses')).rows;
-  assert.equal(saved.length,1);assert.equal(saved[0].pre_ai_judgement,5);assert.equal(saved[0].post_ai_judgement,2);assert.equal(saved[0].ip_hash,null);assert.equal(saved[0].case_version,'alex_v1');
-  assert.equal((await h.call({...base,action:'resume'})).body.completed,true);
-  for(const role of ['anon','authenticated']){
-   await h.database.exec(`set role ${role}`);
-   await assert.rejects(h.database.query('select * from experiment_responses'));
-   await assert.rejects(h.database.query('insert into experiment_sessions (session_id) values (gen_random_uuid())'));
-   await h.database.exec('reset role');
-  }
-  h.settings.RATE_LIMIT_PER_MINUTE='1';assert.equal((await h.call({action:'config'})).status,429);
- }finally{await h.close();}
+
+function completeDraft() {
+ localStorage.removeItem('hci_experiment_v1');localStorage.removeItem('experiment_completed');
+ const session=beginSession();session.pre_ai_judgement=5;lockPreJudgement(session);session.post_ai_judgement=2;
+ session.answers=Object.fromEntries(QUESTIONS.map(([k])=>[k,4]));session.step='questionnaire';saveSession(session);return session;
+}
+test('local pre and assignment are immutable without any network request',()=>{
+ const session=completeDraft();const original=loadSession();
+ assert.throws(()=>saveSession({...session,pre_ai_judgement:1}),/locked/);
+ assert.throws(()=>saveSession({...session,condition:session.condition==='XAI'?'NO_XAI':'XAI'}),/locked/);
+ assert.throws(()=>saveSession({...session,step:'pre'}),/locked/);
+ assert.deepEqual(loadSession(),original);
+});
+test('final payload contains every sheet column except its server timestamp',()=>{
+ const session=completeDraft();const payload=buildSubmissionPayload(session);const h=createHarness();
+ assert.deepEqual(Object.keys(payload).sort(),h.headers.filter(k=>k!=='server_received_at').sort());
+ assert.equal(payload.submission_id,session.submission_id);assert.equal(payload.pre_ai_judgement,5);assert.equal(payload.post_ai_judgement,2);
+ assert.deepEqual(JSON.parse(payload.explanation_factors_json),explainClassification(CASE_FEATURES,classifyProfile(CASE_FEATURES)));
+ assert.equal(payload.experiment_version,'2.0.0');
+});
+test('empty endpoint rejects only the final submission',async()=>{
+ const session=completeDraft();assert.equal(session.step,'questionnaire');
+ await assert.rejects(sendSubmission(buildSubmissionPayload(session)),/The study data endpoint is not configured\./);
+});
+test('Apps Script validates all ratings, IDs, stimulus, timestamps and fields',()=>{
+ const h=createHarness();const payload=buildSubmissionPayload(completeDraft());
+ for(const key of ['pre_ai_judgement','post_ai_judgement',...QUESTIONS.map(([k])=>k)])for(const value of [0,8,1.5,'4',null])assert.equal(h.call({...payload,[key]:value}).error,'invalid_payload');
+ for(const [key,value] of [['submission_id','not-uuid'],['condition','OTHER'],['created_at','invalid'],['feature_attention',4],['experiment_version','1.0.0'],['duration_seconds',-1],['test_mode','true'],['explanation_factors_json','bad-json'],['classification','=IMPORTDATA("https://example.org")']])assert.equal(h.call({...payload,[key]:value}).error,'invalid_payload');
+ assert.equal(h.call({...payload,extra:'not-allowed'}).error,'invalid_payload');
+ assert.equal(h.raw('{broken').error,'invalid_payload');assert.equal(h.raw('x'.repeat(16001)).error,'invalid_payload');
+ const missing={...payload};delete missing.a1;assert.equal(h.call(missing).error,'invalid_payload');
+ assert.equal(h.rows.length,1);
+ assert.equal(h.call(payload).ok,true);assert.equal(h.rows.length,2);
+ assert.ok(h.logs.every(message=>!message.includes(payload.submission_id)));
+});
+test('Apps Script duplicate check and write share a lock, with flush before release',()=>{
+ const h=createHarness();const payload=buildSubmissionPayload(completeDraft());
+ h.events.length=0;
+ assert.deepEqual(h.call(payload),{ok:true,duplicate:false});assert.deepEqual(h.events,['lock','append','flush','release']);
+ h.events.length=0;
+ assert.deepEqual(h.call(payload),{ok:true,duplicate:true});assert.deepEqual(h.events,['lock','find','release']);
+ assert.equal(h.rows.length,2);
+ const row=Object.fromEntries(h.headers.map((key,i)=>[key,h.rows[1][i]]));assert.equal(row.submission_id,payload.submission_id);assert.ok(Date.parse(row.server_received_at));
+ h.state.busy=true;assert.equal(h.call({...payload,submission_id:crypto.randomUUID()}).error,'busy_retry');assert.equal(h.rows.length,2);
+ h.state.busy=false;h.state.failWrite=true;assert.equal(h.call({...payload,submission_id:crypto.randomUUID()}).error,'storage_error');assert.equal(h.state.held,false);
+});
+test('Apps Script setup is repeatable and refuses mismatched headers',()=>{
+ const h=createHarness({setup:false});const payload=buildSubmissionPayload(completeDraft());
+ assert.equal(h.call(payload).error,'setup_required');h.context.setup();h.context.setup();assert.equal(h.rows.length,1);
+ h.rows[0][0]='wrong';assert.equal(h.call(payload).error,'header_mismatch');assert.equal(h.rows.length,1);
 });
 
-test('Chrome: complete both conditions, all visible questions, responsive and recovery', {skip:!integrationEnabled,timeout:240000}, async()=>{
- const {createHarness,serveApp,root,toolsDir}=await import('./helpers.mjs');
- const {pathToFileURL}=await import('node:url');const path=await import('node:path');
+test('Chrome: both complete local flows, final POST only, visible questions and recovery', {skip:!process.env.TEST_TOOLS_DIR,timeout:180000},async()=>{
+ const {serveApp,root,toolsDir}=await import('./helpers.mjs');const {pathToFileURL}=await import('node:url');const path=await import('node:path');
  const {chromium}=await import(pathToFileURL(path.join(toolsDir,'playwright/index.mjs')));
- const h=await createHarness();const server=await serveApp(h);
- const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});
+ const server=await serveApp();const browser=await chromium.launch({executablePath:process.env.CHROME_PATH||'/opt/google/chrome/chrome',headless:true,args:['--no-sandbox']});
  const artifacts=path.join(root,'tests/artifacts');fs.mkdirSync(artifacts,{recursive:true});
- const report=[];
- async function visible(page,selector){await page.locator(selector).waitFor({state:'visible'});assert.ok(await page.locator('main').innerText());assert.ok(await page.locator(selector).isVisible());}
+ const endpoint='https://script.google.com/macros/s/TEST_DEPLOYMENT/exec';const report=[];
+ async function visible(page,selector){await page.locator(selector).waitFor({state:'visible'});assert.ok(await page.locator('main').innerText());}
  async function fit(page){assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1),'Horizontal overflow');}
- async function screenshot(page,name){
+ async function capture(page,name){
   await fit(page);await page.screenshot({path:path.join(artifacts,name+'.png'),fullPage:true});
   if(['consent','case','pre','assessment','post'].some(stage=>name.endsWith('-'+stage))){
-   const size=page.viewportSize();await page.setViewportSize({width:320,height:768});await fit(page);
-   await page.screenshot({path:path.join(artifacts,name+'-mobile.png'),fullPage:true});
-   await page.setViewportSize(size);
+   const size=page.viewportSize();await page.setViewportSize({width:320,height:768});await fit(page);await page.screenshot({path:path.join(artifacts,name+'-mobile.png'),fullPage:true});await page.setViewportSize(size);
   }
  }
+ async function config(context,settings){
+  await context.route('**/js/config.js',async route=>{
+   const response=await route.fetch();const source=(await response.text()).replace("export const APPS_SCRIPT_URL = '';",`export const APPS_SCRIPT_URL = '${settings.url}';`).replace('export const TEST_MODE = false;',`export const TEST_MODE = ${settings.test};`);
+   await route.fulfill({response,body:source});
+  });
+ }
  try {
-  let assessmentText;
-  for(const condition of ['NO_XAI','XAI']) {
-   const context=await browser.newContext({viewport:{width:1365,height:768}});const page=await context.newPage();
-   const errors=[];page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
-   await page.goto(`http://127.0.0.1:8000/PERSUASIVE26/?condition=${condition}`);
-   await visible(page,'#consent-check');await screenshot(page,`${condition}-consent`);
-   assert.equal((await h.database.query('select * from experiment_sessions')).rows.length,condition==='NO_XAI'?0:1);
-   await page.locator('#consent-check').check();await page.locator('#agree').click();
-   await visible(page,'.case-grid');assert.equal(await page.locator('main input,main select,main textarea').count(),0);
-   const initial=await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')));assert.equal(initial.condition,null);
-   await screenshot(page,`${condition}-case`);await page.reload();await visible(page,'.case-grid');
-   await page.locator('#next').click();await visible(page,'#judgement-form');
-   assert.equal(await page.locator('#judgement-next').isDisabled(),true);
-   await page.locator('[name=pre_ai_judgement][value="5"]').check();await screenshot(page,`${condition}-pre`);
+  let sharedAssessment;
+  for(const condition of ['NO_XAI','XAI']){
+   const h=createHarness();const settings={url:'',test:true};const context=await browser.newContext({viewport:{width:1365,height:768}});await config(context,settings);
+   const page=await context.newPage();const errors=[],network=[],payloads=[];let failNetwork=false;
+   page.on('pageerror',error=>errors.push(error.message));page.on('console',message=>{if(message.type()==='error')errors.push(message.text());});
+   page.on('request',request=>{if(['fetch','xhr'].includes(request.resourceType()))network.push(request.method()+' '+request.url());});
+   await context.route(endpoint,async route=>{
+    payloads.push(route.request().postDataJSON());
+    assert.equal(route.request().method(),'POST');assert.match(route.request().headers()['content-type'],/^text\/plain/);
+    if(failNetwork){failNetwork=false;await route.abort('failed');return;}
+    const response=h.call(payloads.at(-1));await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(response)});
+   });
+   await page.goto(`http://127.0.0.1:8000/PERSUASIVE26/?condition=${condition}`);await visible(page,'#consent-check');await capture(page,`${condition}-consent`);
+   assert.equal(await page.evaluate(()=>localStorage.getItem('hci_experiment_v1')),null);
+   await page.locator('#consent-check').check();await page.locator('#agree').click();await visible(page,'.case-grid');
+   assert.equal(await page.locator('main input,main select,main textarea').count(),0);await capture(page,`${condition}-case`);
+   const original=await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')));assert.equal(original.condition,null);assert.ok(original.submission_id);
+   await page.reload();await visible(page,'.case-grid');await page.locator('#next').click();await visible(page,'#judgement-form');
+   assert.equal(await page.locator('#judgement-next').isDisabled(),true);await page.locator('[name=pre_ai_judgement][value="5"]').check();await capture(page,`${condition}-pre`);
    await page.reload();await visible(page,'#judgement-form');assert.equal(await page.locator('[name=pre_ai_judgement][value="5"]').isChecked(),true);
    await page.locator('#judgement-next').click();await visible(page,'#assessment-text');
-   const text=await page.locator('#assessment-text').innerText();if(assessmentText)assert.equal(text,assessmentText);assessmentText=text;
-   assert.equal(await page.locator('#explanation').count(),condition==='XAI'?1:0);
-   const assigned=await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')));
-   assert.equal(assigned.condition,condition);assert.equal(assigned.participant_id,initial.participant_id);assert.equal(assigned.pre_locked,true);
-   await screenshot(page,`${condition}-assessment`);
-   // Even a stale tab's earlier step cannot unlock the initial judgement after reload.
-   await page.evaluate(()=>{const s=JSON.parse(localStorage.getItem('hci_experiment_v1'));s.step='pre';s.pre_ai_judgement=7;localStorage.setItem('hci_experiment_v1',JSON.stringify(s));});
+   const text=await page.locator('#assessment-text').innerText();if(sharedAssessment)assert.equal(text,sharedAssessment);sharedAssessment=text;
+   assert.equal(await page.locator('#explanation').count(),condition==='XAI'?1:0);await capture(page,`${condition}-assessment`);
+   const assigned=await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')));assert.equal(assigned.condition,condition);assert.equal(assigned.pre_locked,true);
+   assert.equal(assigned.submission_id,original.submission_id);assert.equal(assigned.participant_id,original.participant_id);
+   // A stale earlier screen is redirected locally to assessment once the pre is locked.
+   await page.evaluate(()=>{const s=JSON.parse(localStorage.getItem('hci_experiment_v1'));s.step='pre';localStorage.setItem('hci_experiment_v1',JSON.stringify(s));});
    await page.reload();await visible(page,'#assessment-text');assert.equal(await page.locator('[name=pre_ai_judgement]').count(),0);
-   assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')).pre_ai_judgement),5);
-   await page.locator('#next').click();await visible(page,'[name=post_ai_judgement][value="1"]');
-   assert.equal(await page.locator('[name=pre_ai_judgement]').count(),0);
-   await page.locator('[name=post_ai_judgement][value="2"]').check();await screenshot(page,`${condition}-post`);
-   await page.locator('#judgement-next').click();await visible(page,'#submit');
-   assert.equal(await page.locator('fieldset').count(),13);assert.equal(await page.locator('input[required]').count(),91);
-   assert.equal(await page.locator('#submit').isDisabled(),true);
+   await page.locator('#next').click();await visible(page,'[name=post_ai_judgement][value="1"]');assert.equal(await page.locator('#judgement-next').isDisabled(),true);
+   assert.equal(await page.locator('[name=pre_ai_judgement]').count(),0);await page.locator('[name=post_ai_judgement][value="2"]').check();await capture(page,`${condition}-post`);
+   await page.reload();assert.equal(await page.locator('[name=post_ai_judgement][value="2"]').isChecked(),true);await page.locator('#judgement-next').click();await visible(page,'#submit');
+   assert.equal(await page.locator('fieldset').count(),13);assert.equal(await page.locator('input[required]').count(),91);assert.equal(await page.locator('#submit').isDisabled(),true);
    for(const [key,text] of QUESTIONS){
-    const field=page.locator('fieldset').filter({has:page.locator(`[name=${key}]`)});
-    assert.ok((await field.innerText()).includes(text));await field.scrollIntoViewIfNeeded();assert.ok(await field.isVisible());
-    await page.locator(`[name=${key}][value="4"]`).check();
+    const field=page.locator('fieldset').filter({has:page.locator(`[name=${key}]`)});assert.ok((await field.innerText()).includes(text));
+    await field.scrollIntoViewIfNeeded();assert.ok(await field.isVisible());await page.locator(`[name=${key}][value="4"]`).check();
     if(key!=='mc1')assert.equal(await page.locator('#submit').isDisabled(),true);
    }
-   await screenshot(page,`${condition}-questionnaire-desktop`);
-   await page.reload();await visible(page,'#submit');assert.equal(await page.locator('input:checked').count(),13);
-   await page.setViewportSize({width:320,height:768});await fit(page);await screenshot(page,`${condition}-questionnaire-mobile`);
-   await page.setViewportSize({width:1365,height:768});
-   await page.evaluate(()=>document.documentElement.style.zoom='2');await fit(page);await screenshot(page,`${condition}-questionnaire-css-zoom-200`);
-   await page.evaluate(()=>document.documentElement.style.zoom='');
-   await page.setViewportSize({width:682,height:384}); // 1365x768 at 200% browser zoom: half the CSS viewport.
-   await fit(page);await screenshot(page,`${condition}-questionnaire-200-percent`);
-   // Keyboard focus and arrow navigation operate the native radios.
+   await capture(page,`${condition}-questionnaire-desktop`);await page.reload();await visible(page,'#submit');assert.equal(await page.locator('input:checked').count(),13);
+   await page.setViewportSize({width:320,height:768});await capture(page,`${condition}-questionnaire-mobile`);
+   await page.setViewportSize({width:1365,height:768});await page.evaluate(()=>document.documentElement.style.zoom='2');await capture(page,`${condition}-questionnaire-zoom200`);await page.evaluate(()=>document.documentElement.style.zoom='');
    await page.locator('[name=mc1][value="4"]').focus();await page.keyboard.press('ArrowRight');assert.equal(await page.locator('[name=mc1][value="5"]').isChecked(),true);
+   assert.deepEqual(network,[]);assert.deepEqual(errors,[]);assert.equal(h.rows.length,1);
+   await page.locator('#submit').click();await page.getByText('The study data endpoint is not configured.',{exact:true}).waitFor();assert.deepEqual(network,[]);
+   assert.ok(errors.every(message=>message.includes('The study data endpoint is not configured.')));errors.length=0;
+   // The endpoint is configured only now, for the final request. No script setup is needed to reach here.
+   settings.url=endpoint;await page.reload();await visible(page,'#submit');
    if(condition==='XAI'){
-    let drop=true;
-    await page.route('**/api',async route=>{
-     if(route.request().postDataJSON().action==='submit' && drop){drop=false;await route.fetch();await route.abort('failed');}else await route.continue();
-    });
-    await page.locator('#submit').click();await page.locator('#error').filter({hasText:'Unable to connect'}).waitFor();
-    assert.equal(await page.locator('input:checked').count(),13);
-    assert.ok(errors.length>0);errors.length=0; // These diagnostics are expected for the injected failure.
+    failNetwork=true;await page.locator('#submit').click();await page.locator('#error').filter({hasText:'Unable to send'}).waitFor();
+    assert.equal(await page.locator('input:checked').count(),13);assert.equal(await page.locator('input:disabled').count(),91);errors.length=0;
+    // A rejected server write is opaque too: never claim it was saved.
+    h.state.failWrite=true;
    }
-   await page.locator('#submit').click();await page.getByRole('heading',{name:'Your responses have been saved.'}).waitFor();
-   await screenshot(page,`${condition}-complete`);
-   await page.reload();await page.getByRole('heading',{name:'You have already completed this study.'}).waitFor();
-   assert.deepEqual(errors,[]);report.push(`${condition}: consent, fixed case, pre, assessment, post, all 13 items and completion; reloads, subpath, 320px and 200% equivalent CSS viewport; no console errors.`);
+   await page.locator('#submit').click();await page.getByRole('heading',{name:'Your submission has been sent.'}).waitFor();
+   assert.ok((await page.locator('main').innerText()).includes('cannot confirm whether your responses were saved'));
+   assert.equal(h.rows.length,condition==='XAI'?1:2);assert.equal(await page.evaluate(()=>localStorage.getItem('experiment_completed')),'true');
+   await capture(page,`${condition}-complete`);h.state.failWrite=false;
+   await page.locator('#retry-submission').click();await page.getByRole('heading',{name:'Your submission has been sent.'}).waitFor();
+   assert.equal(h.rows.length,2);await page.reload();await visible(page,'#retry-submission');await page.locator('#retry-submission').click();await visible(page,'#retry-submission');
+   assert.equal(h.rows.length,2);assert.ok(payloads.length>=3);assert.ok(payloads.every(p=>JSON.stringify(p)===JSON.stringify(payloads[0])));
+   assert.equal(payloads[0].submission_id,original.submission_id);assert.equal(payloads[0].pre_ai_judgement,5);assert.equal(payloads[0].post_ai_judgement,2);
+   assert.deepEqual(errors,[]);
+   await page.goto('http://127.0.0.1:8000/PERSUASIVE26/?debug=1');await visible(page,'#debug');assert.match(await page.locator('#debug').innerText(),new RegExp(original.submission_id));
+   await page.locator('#reset').click();await visible(page,'#consent-check');assert.equal(await page.evaluate(()=>localStorage.getItem('experiment_completed')),null);
+   report.push(`${condition}: complete local flow, no network before Submit, all 13 visible required items, desktop/mobile/zoom, keyboard, reloads, honest unconfirmed completion and idempotent final retries. Normal console: clean.`);
    await context.close();
   }
-  // Initial UI renders with no backend configured, and network failures are actionable.
-  h.frontendURL='';const context=await browser.newContext({viewport:{width:320,height:768}});const page=await context.newPage();
-  await page.goto('http://127.0.0.1:8000/');await visible(page,'#consent-check');await fit(page);await screenshot(page,'unconfigured-consent-mobile');
-  await page.locator('#consent-check').check();await page.locator('#agree').click();await page.getByText('The study is not configured yet.',{exact:false}).waitFor();
-  assert.ok(await page.locator('#consent-check').isVisible());
-  for(const raw of ['{broken',JSON.stringify({experiment_version:'1.0.0'}),JSON.stringify({experiment_version:'1.1.0'})]){
+  const context=await browser.newContext();const settings={url:'',test:false};await config(context,settings);await context.addInitScript(()=>{Math.random=()=>0.1;});const page=await context.newPage();
+  await page.goto('http://127.0.0.1:8000/?condition=XAI&debug=1');await visible(page,'#consent-check');assert.equal(await page.locator('#debug').count(),0);
+  await page.locator('#consent-check').check();await page.locator('#agree').click();await visible(page,'.case-grid');await page.locator('#next').click();await page.locator('[name=pre_ai_judgement][value="4"]').check();await page.locator('#judgement-next').click();await visible(page,'#assessment-text');
+  assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')).condition),'NO_XAI');assert.equal(await page.locator('#explanation').count(),0);
+  for(const raw of ['{broken',JSON.stringify({experiment_version:'1.1.0'}),JSON.stringify({experiment_version:'2.0.0'})]){
    await page.evaluate(value=>localStorage.setItem('hci_experiment_v1',value),raw);await page.reload();await visible(page,'#recover');await page.locator('#recover').click();await visible(page,'#consent-check');
   }
-  h.frontendURL=undefined;
-  await page.reload();await visible(page,'#consent-check');await page.route('**/api',route=>route.abort('failed'));
-  await page.locator('#consent-check').check();await page.locator('#agree').click();await page.locator('#error').filter({hasText:'Unable to connect'}).waitFor();await visible(page,'#consent-check');await page.unroute('**/api');
-  await page.route('**/js/config.js',route=>route.fulfill({status:404,body:'missing'}));await page.reload();await page.getByRole('heading',{name:'Unable to open the study'}).waitFor();await page.unroute('**/js/config.js');
+  await page.route('**/js/classifier.js',route=>route.fulfill({status:404,body:'missing'}));await page.reload();await page.getByRole('heading',{name:'Unable to open the study'}).waitFor();await page.unroute('**/js/classifier.js');
   await page.goto(pathToFileURL(path.join(root,'index.html')).href);await page.getByRole('heading',{name:'Unable to open the study'}).waitFor();assert.match(await page.locator('main').innerText(),/web server/);
   await context.close();
-  // Production ignores both forced assignment and debug. Fix RNG to make this deterministic.
-  h.frontendURL=undefined;h.settings.TEST_MODE='false';
-  const production=await browser.newContext();await production.addInitScript(()=>{Math.random=()=>0.1;});const prod=await production.newPage();
-  await prod.goto('http://127.0.0.1:8000/PERSUASIVE26/?condition=XAI&debug=1');await visible(prod,'#consent-check');assert.equal(await prod.locator('#debug').count(),0);
-  await prod.locator('#consent-check').check();await prod.locator('#agree').click();await visible(prod,'.case-grid');await prod.locator('#next').click();await prod.locator('[name=pre_ai_judgement][value="4"]').check();await prod.locator('#judgement-next').click();await visible(prod,'#assessment-text');
-  assert.equal(await prod.evaluate(()=>JSON.parse(localStorage.getItem('hci_experiment_v1')).condition),'NO_XAI');assert.equal(await prod.locator('#explanation').count(),0);await production.close();
-  report.push('Unconfigured backend, corrupted/old state, missing module, file://, production forced-condition/debug rejection verified.');
+  report.push('Production ignores condition/debug parameters; corrupt/old state, root and Pages subpath, failed imports and file:// diagnostics verified. Apps Script services are test doubles; no live Google deployment used.');
   fs.writeFileSync(path.join(artifacts,'verification.txt'),report.join('\n')+'\n');
- }finally{await browser.close();await server.close();await h.close();}
-});
-
-test('migration preserves legacy records and requires new pre/post data', {skip:!integrationEnabled},async()=>{
- const {toolsDir,root}=await import('./helpers.mjs');const {pathToFileURL}=await import('node:url');const path=await import('node:path');
- const {PGlite}=await import(pathToFileURL(path.join(toolsDir,'@electric-sql/pglite/dist/index.js')));
- const database=new PGlite();
- try {
-  await database.exec('create role anon;create role authenticated;create role service_role;');
-  // Reconstruct the original schema by removing precisely the new schema additions.
-  let legacy=fs.readFileSync(path.join(root,'supabase/schema.sql'),'utf8').split('create function public.lock_experiment_pre')[0];
-  legacy=legacy.replace(' condition text check',' condition text not null check');
-  legacy=legacy.replace(' experiment_version text not null,\n',''); // Session column only; response version already existed.
-  legacy=legacy.split('\n').filter(line=>!/^ (case_version|pre_ai_judgement|post_ai_judgement|pre_recorded_at) /.test(line)).join('\n');
-  await database.exec(legacy);
-  const sid=crypto.randomUUID(),pid=crypto.randomUUID();
-  await database.query("insert into experiment_sessions(session_id,participant_id,token_hash,condition) values($1,$2,'legacy-token','XAI')",[sid,pid]);
-  const row={participant_id:pid,session_id:sid,condition:'XAI',created_at:new Date().toISOString(),classification:'ADHD_RELATED',explanation_factors:'[]',duration_seconds:10,experiment_version:'1.0.0',classifier_version:'1.0.0',...Object.fromEntries(QUESTIONS.map(([k])=>[k,4])),...Object.fromEntries('attention distractibility impulsivity changes social_communication repetitive_behaviours'.split(' ').map(k=>['case_'+k,0]))};
-  const keys=Object.keys(row);await database.query(`insert into experiment_responses(${keys.join(',')}) values(${keys.map((_,i)=>'$'+(i+1)).join(',')})`,Object.values(row));
-  await database.exec(fs.readFileSync(path.join(root,'supabase/migrations/202609060001_pre_post.sql'),'utf8'));
-  const old=(await database.query('select * from experiment_responses')).rows[0];assert.equal(old.experiment_version,'1.0.0');assert.equal(old.pre_ai_judgement,null);assert.equal(old.case_version,null);
-  await assert.rejects(database.query("update experiment_responses set experiment_version='1.1.0'"));
-  assert.equal((await database.query("select * from lock_experiment_pre($1,'legacy-token',4,'NO_XAI')",[sid])).rows.length,0);
-  const sid2=crypto.randomUUID();await database.query("insert into experiment_sessions(session_id,participant_id,token_hash,condition,experiment_version,case_version) values($1,$2,'new-token',null,'1.1.0','alex_v1')",[sid2,crypto.randomUUID()]);
-  assert.deepEqual((await database.query("select * from lock_experiment_pre($1,'new-token',4,'NO_XAI')",[sid2])).rows[0],{pre_ai_judgement:4,condition:'NO_XAI'});
- }finally{await database.close();}
+ }finally{await browser.close();await server.close();}
 });

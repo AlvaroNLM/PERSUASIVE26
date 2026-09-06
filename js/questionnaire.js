@@ -1,3 +1,4 @@
+export const isJudgement = value => Number.isInteger(value) && value >= 1 && value <= 7;
 export const QUESTIONS = [
  ['a1', "I would accept the AI system's assessment."],
  ['a2', "I find the AI system's assessment convincing."],

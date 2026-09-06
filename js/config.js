@@ -1,4 +1,5 @@
-// Public configuration only. No API keys are needed in this application.
-export const FUNCTION_URL = 'https://TU_PROJECT_REF.supabase.co/functions/v1/submit-response'; // https://PROJECT.supabase.co/functions/v1/submit-response
-export const TEST_MODE = false;
-export { EXPERIMENT_VERSION, CASE_VERSION } from '../supabase/functions/_shared/protocol.js';
+// Public settings only. Paste the deployed Google Apps Script /exec URL here.
+export const APPS_SCRIPT_URL = '';
+export const TEST_MODE = true; //ture testing, false when publishing
+export const EXPERIMENT_VERSION = '2.0.0';
+export const CASE_VERSION = 'alex_v1';

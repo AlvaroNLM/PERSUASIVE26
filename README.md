@@ -1,246 +1,236 @@
-# Experimento de interpretación de IA
+# Experimento de interpretación de IA · 2.0.0
 
-Aplicación estática en inglés para un estudio entre sujetos XAI / NO-XAI. HTML, CSS y JavaScript vanilla, sin dependencias ni build. El backend es una Supabase Edge Function con acceso privado a PostgreSQL. No se ha desplegado todavía: es necesario configurar un proyecto propio.
-
-## Flujo actual (experimento 1.1.0)
+Aplicación académica de HCI/XAI en HTML, CSS y JavaScript vanilla, sin frameworks, dependencias de ejecución ni compilación.
 
 ```text
-Consent
-   ↓
-Fictional case (alex_v1, solo lectura)
-   ↓
-Pre-AI judgement (1–7)
-   ↓
-Random assignment (50/50, persistida y registrada una sola vez)
-   ↓
-┌─────────────────────┬─────────────────────┐
-│ NO-XAI              │ XAI                 │
-│ AI assessment       │ AI assessment       │
-│                     │ + explanation       │
-└─────────────────────┴─────────────────────┘
-   ↓
-Post-AI judgement (1–7)
-   ↓
-Questionnaire (13 ítems obligatorios)
-   ↓
-Complete
+GitHub Pages → navegador: experimento + clasificador + XAI
+                         ↓ solo al pulsar Submit responses
+              Google Apps Script Web App → Google Sheets
 ```
 
-Se mantienen exactamente dos condiciones. El texto, caso, clasificación y estructura base son iguales; la única manipulación es la presencia de la explicación. La condición no se etiqueta en la interfaz del participante.
+Todo el recorrido, incluidas recargas y asignación, funciona localmente sin servicios externos. Google Apps Script recibe exclusivamente el envío final, lo valida y añade una fila a una hoja privada. No ejecuta el modelo.
 
-El consentimiento es la primera pantalla y se renderiza sin red ni backend configurado. El texto institucional en `consent()` de `js/app.js` está marcado **PROVISIONAL CONSENT**: se deben completar institución, contacto, conservación y aprobación del protocolo antes de reclutar. No se presentan las hipótesis ni las condiciones en la interfaz.
+## Objetivo y research questions
 
-Alex tiene valores fijos: atención 3, distractibilidad 4, impulsividad 2, cambios 1, comunicación social 1 y conductas repetitivas 0. El caso es exclusivamente de lectura; no hay controles para editarlo. `case_version = "alex_v1"` identifica este estímulo y los seis valores se guardan para reproducibilidad.
-
-Las escalas pre y post son idénticas: 1 = Much more consistent with ADHD-related characteristics; 4 = Unsure / equally consistent; 7 = Much more consistent with ASD-related characteristics. Ambas exigen enteros de 1 a 7. El post no muestra la respuesta previa. Al enviar el pre, la función SQL `lock_experiment_pre` fija el juicio y la condición atómicamente **antes** de que se renderice la IA. Una segunda llamada devuelve los valores originales. Un trigger impide cambiarlos. La restauración consulta al servidor para que una recarga o una pestaña antigua no desbloqueen el juicio previo.
-
-La regla provisional suma los tres primeros factores (9) y los tres últimos (2). El grupo con mayor suma determina la clasificación; los empates devuelven `INCONCLUSIVE`. `classifyProfile(features)` y `explainClassification(features, classification)` comparten las reglas y rechazan clasificaciones incoherentes. La explicación ordena los tres factores del grupo ganador por contribución real, con peso unitario.
-
-**PROVISIONAL EXPERIMENTAL CLASSIFIER — NOT CLINICALLY VALIDATED.** Este clasificador no tiene validez diagnóstica ADHD/ASD. Permanece aislado en `supabase/functions/_shared/classifier.js`, reexportado desde `js/classifier.js`, para sustituirlo posteriormente por un modelo/regla revisado de BALIDA-AA. El frontend y el backend utilizan el mismo módulo; `.nojekyll` conserva `_shared` en Pages. La versión del clasificador sigue siendo `1.0.0` porque la regla no ha cambiado; el protocolo nuevo usa `experiment_version = "1.1.0"`.
-
-Los UUID v4 se crean después de aceptar, y los borradores se conservan en `localStorage`. La asignación se genera después del juicio inicial mediante `Math.random() < 0.5` y se persiste antes de la petición. Los reintentos conservan la sesión. Se guarda la explicación calculada en ambas condiciones para reproducibilidad, aunque solo se muestra en XAI.
-
-## Research questions
+El estudio compara dos condiciones entre sujetos: una evaluación de IA sin explicación (`NO_XAI`) y exactamente la misma evaluación con explicación (`XAI`). La asignación es aleatoria 50/50, una sola vez después del juicio inicial. No se revelan al participante las etiquetas de las condiciones ni las hipótesis. El caso, resultado, texto base y estructura son idénticos; la única manipulación es la presencia de la explicación.
 
 - **RQ1.** Does providing an XAI explanation increase users' acceptance of an AI-generated ADHD/ASD-related assessment?
 - **RQ2.** How does providing an XAI explanation affect users' trust in and perceived transparency of an AI-generated ADHD/ASD-related assessment?
 - **RQ3.** Does providing an XAI explanation affect users' perceived autonomy and perceived manipulation when evaluating an AI-generated ADHD/ASD-related assessment?
 - **RQ4.** Does providing an XAI explanation produce a greater shift in users' own judgement toward the AI-generated assessment?
 
-Acceptance/persuasion (A1–A4) es el **primary self-reported outcome**. Trust (T1–T2), transparency (TR1–TR2), responsible persuasion (RP1–RP3), usefulness (U1) y manipulation check (MC1) se conservan como ítems numéricos separados. Las agrupaciones de constructos se documentan aquí, sin rotular hipótesis de persuasión en la interfaz.
+**Primary self-reported outcome: Acceptance / persuasion (A1–A4).** El judgement outcome compara `pre_ai_judgement` con `post_ai_judgement`. En este estímulo, 1 apunta hacia ADHD y 7 hacia ASD: **`post - pre < 0` indica movimiento hacia la valoración de la IA**. Siempre se guardan los dos valores brutos; la diferencia no los sustituye. Preespecifica la agregación de ítems y el análisis antes de recoger datos. No se mide diagnóstico clínico ni comportamiento clínico.
 
-El pre/post permite medir cambio de juicio. Como la IA apunta al extremo 1, `pre_ai_judgement - post_ai_judgement` positivo representa un desplazamiento hacia su evaluación; cero representa ausencia de cambio. Debe preespecificarse el análisis, incluida la agregación de escalas, antes del estudio. **No se mide diagnóstico clínico ni comportamiento clínico.** El clasificador y el consentimiento son provisionales.
-
-## Diagnóstico y corrección de la pantalla vacía
-
-Se reprodujo en Chrome el problema exacto al abrir `index.html` mediante `file://`: CORS bloqueaba el módulo `js/app.js` desde el origen `null`. Como sus imports estáticos se evalúan antes del `try/catch`, la aplicación nunca inicializaba `main`. Por HTTP, tanto en `/` como en `/PERSUASIVE26/`, la versión anterior sí renderizaba la landing. No se ha confirmado la URL concreta que originó el reporte del usuario.
-
-Además, el consentimiento anterior dependía de `api({action:'config'})` y la URL vacía impedía verlo. Ahora:
-
-- `index.html` carga `js/bootstrap.js`, un script clásico que espera al DOM e importa la aplicación de forma controlada.
-- `app.initialize()` renderiza el consentimiento inmediatamente, sin peticiones.
-- Los fallos de módulos/configuración tienen diagnóstico visible, `console.error` y reintento. `file://` explica cómo abrir un servidor; no intenta eludir la seguridad de módulos del navegador.
-- La configuración de privacidad se consulta al pulsar **I agree to participate**. Si falta backend, el consentimiento permanece y el error aparece allí. Si hay hash, se exige consentimiento adicional antes de iniciar.
-- Los estados antiguos, incompletos o corruptos muestran una recuperación explícita. El botón elimina solo el borrador local y vuelve al consentimiento; no borra respuestas del servidor ni `experiment_completed`.
-
-Esto corrige la inicialización real; el contenido experimental continúa renderizado por JavaScript, sin duplicarlo como contenido estático en HTML.
-
-## 1. Crear Supabase
-
-Crea un proyecto en el plan gratuito en [Supabase](https://supabase.com/dashboard). Guarda la contraseña de la base de datos fuera del repositorio. Anota el identificador del proyecto. Las cuotas y disponibilidad del plan dependen del proveedor.
-
-## 2. Crear las tablas
-
-Para una base **nueva**, en SQL Editor ejecuta una vez `supabase/schema.sql`. Crea respuestas, sesiones, contadores de peticiones y reservas opcionales de hashes. Todas las tablas tienen RLS y carecen de acceso para `anon` y `authenticated`; únicamente el backend escribe mediante `service_role`. No añadas políticas públicas de inserción.
-
-Si ya ejecutaste el esquema 1.0.0, **no repitas schema.sql**: ejecuta una sola vez `supabase/migrations/202609060001_pre_post.sql` en SQL Editor. La migración conserva registros anteriores y deja sus nuevos campos en `NULL` (no inventa juicios históricos). Las respuestas 1.1.0 deben tener pre, post y `case_version`. Añade las columnas y funciones de bloqueo a sesiones. No ejecutes la migración sobre una instalación nueva creada con el schema actualizado, que ya la incorpora.
-
-Despliega en este orden, fuera de una recogida activa: **SQL/migración → Edge Function → frontend**. Las sesiones 1.0.0 no pueden continuar en 1.1.0 y deben reiniciarse de forma explícita en la interfaz. No mezcles versiones en el análisis.
-
-`created_at` se genera en PostgreSQL al aceptar el consentimiento e iniciar la sesión. `submitted_at` se genera en PostgreSQL al insertar la respuesta. Son `timestamptz`; PostgreSQL conserva instantes absolutos y la visualización depende de la zona horaria del cliente. `duration_seconds` se calcula en servidor desde el inicio, incluyendo pausas, recargas y tiempo con la pestaña cerrada. Se guardan `experiment_version`, `classifier_version`, `case_version`, `pre_ai_judgement`, `post_ai_judgement` y `test_mode`. En sesiones, la condición es NULL hasta fijar el pre y `pre_recorded_at` registra ese momento en servidor; en respuestas completas la condición es obligatoria.
-
-## 3. Desplegar la Edge Function
-
-Con Node y la CLI de Supabase disponibles:
-
-```bash
-npx supabase login
-npx supabase link --project-ref TU_PROJECT_REF
-npx supabase functions deploy submit-response --no-verify-jwt
-```
-
-El endpoint admite participantes sin cuenta, por lo que la verificación JWT de plataforma está desactivada explícitamente en `supabase/config.toml`. La función verifica un token aleatorio de sesión en las operaciones posteriores. Su URL será `https://TU_PROJECT_REF.supabase.co/functions/v1/submit-response`.
-
-Documentación oficial: [despliegue](https://supabase.com/docs/guides/functions/deploy), [configuración de funciones](https://supabase.com/docs/guides/functions/function-configuration).
-
-## 4. Definir secretos
-
-Copia `.env.example` a `.env` y ajusta los valores. `.env` está excluido de Git. Ejecuta:
-
-```bash
-npx supabase secrets set --env-file .env
-```
-
-Supabase alojado proporciona `SUPABASE_URL` y `SUPABASE_SERVICE_ROLE_KEY` al entorno de la función. No copies esa clave a JavaScript, HTML, capturas, archivos versionados ni GitHub Pages. El frontend no necesita ninguna clave Supabase. No añadas secretos de despliegue a `js/config.js`.
-
-Variables del backend:
-
-| Variable | Valor inicial / significado |
-| --- | --- |
-| `ALLOWED_ORIGINS` | Orígenes exactos separados por comas |
-| `STORE_IP_HASH` | `false` |
-| `IP_HASH_SALT` | Secreto de al menos 32 caracteres si se activa el hash |
-| `TRUSTED_IP_HEADER` | Cabecera sobrescrita por el proxy de confianza; vacía por defecto |
-| `BLOCK_DUPLICATE_IP_HASH` | `false`; activar solo de manera explícita |
-| `TEST_MODE` | `false`; debe coincidir con el frontend |
-| `RATE_LIMIT_PER_MINUTE` | `120` peticiones por minuto para toda la aplicación |
-
-## 5. Configurar CORS
-
-En desarrollo, por ejemplo:
+## Flujo y estímulo
 
 ```text
-ALLOWED_ORIGINS=https://TU_USUARIO.github.io,http://localhost:8000,http://127.0.0.1:8000
+Information and consent
+          ↓
+Fictional case: Alex (solo lectura)
+          ↓
+Pre-AI judgement (1–7)
+          ↓
+Random assignment (50/50)
+          ↓
+┌────────────────────────┬────────────────────────┐
+│ NO_XAI                 │ XAI                    │
+│ AI-assisted assessment │ AI-assisted assessment │
+│                        │ + explicación          │
+└────────────────────────┴────────────────────────┘
+          ↓
+Post-AI judgement (1–7)
+          ↓
+Questionnaire (13 ítems obligatorios)
+          ↓
+Submit responses → envío final → Completion
 ```
 
-En producción elimina localhost. Para una URL Pages `https://TU_USUARIO.github.io/PERSUASIVE26/`, el origen es `https://TU_USUARIO.github.io`, sin ruta ni barra final. Los orígenes no pueden restringir CORS a un repositorio dentro del mismo dominio. Si necesitas ese aislamiento, utiliza un dominio propio. No se aceptan comodines ni solicitudes sin `Origin`.
+El consentimiento aparece inmediatamente, incluso con `APPS_SCRIPT_URL` vacía. Requiere marcar la casilla y pulsar **I agree to participate**. El contenido institucional en `js/app.js` está marcado **PROVISIONAL CONSENT**: revisa institución, contacto, conservación de datos y aprobación ética antes del estudio real.
 
-CORS limita navegadores, no autentica clientes externos. El límite global es atómico y compartido en PostgreSQL; devuelve 429 cuando se supera y no necesita IP ni fingerprinting. Es una protección básica de capacidad, no una garantía contra automatización o fraude. Los contadores antiguos se eliminan automáticamente.
+Alex es ficticio; el participante únicamente lee el perfil. `case_version = 'alex_v1'`:
 
-## 6. Configurar el frontend
+| Característica | Frecuencia | Valor |
+| --- | --- | --- |
+| Difficulty sustaining attention during long tasks | Often | 3 |
+| Easily distracted by external stimuli | Very often | 4 |
+| Impulsive responding | Sometimes | 2 |
+| Difficulty dealing with unexpected changes | Rarely | 1 |
+| Difficulty interpreting social cues | Rarely | 1 |
+| Repetitive behaviours or interests | Never | 0 |
 
-Edita `js/config.js`:
+Las escalas pre y post son exactamente iguales:
+
+- 1 = Much more consistent with ADHD-related characteristics
+- 4 = Unsure / equally consistent
+- 7 = Much more consistent with ASD-related characteristics
+
+Ambas requieren un entero de 1 a 7. El pre queda bloqueado localmente antes de mostrar la IA; no hay navegación para modificarlo después. El post no muestra la respuesta anterior. El bloqueo y la condición sobreviven a recargas; las pestañas abiertas se actualizan al cambiar el almacenamiento local. Como cualquier frontend público, esto evita cambios accidentales por la interfaz, pero no impide manipular datos deliberadamente con herramientas de desarrollo.
+
+## Clasificador y explicación
+
+**PROVISIONAL EXPERIMENTAL CLASSIFIER**
+
+**NOT CLINICALLY VALIDATED**
+
+El clasificador incluido es provisional y **NO está clínicamente validado** para diagnóstico diferencial ADHD/ASD. No se solicita información clínica del participante.
+
+`js/classifier.js` implementa:
 
 ```js
-export const FUNCTION_URL = 'https://TU_PROJECT_REF.supabase.co/functions/v1/submit-response';
-export const TEST_MODE = false;
-export { EXPERIMENT_VERSION, CASE_VERSION } from '../supabase/functions/_shared/protocol.js';
+const result = classifyProfile(features);
+const factors = explainClassification(features, result);
 ```
 
-El frontend estático no lee `.env`. Si falta la URL o no responde el backend, muestra un error y permite reintentar; nunca presenta un envío fallido como guardado.
+La regla suma atención, distractibilidad e impulsividad (9), y compara con cambios, comunicación social y conductas repetitivas (2). Devuelve `ADHD_RELATED`, `ASD_RELATED` o `INCONCLUSIVE` en caso de empate. La explicación proviene de esos mismos factores y contribuciones unitarias, ordenados por su peso en el resultado. El modelo y la explicación se ejecutan completamente en el navegador, sin llamadas de red.
 
-## 7. Activar GitHub Pages
+La interfaz muestra en ambas condiciones:
 
-Sube los archivos a tu repositorio. En Settings → Pages elige Deploy from a branch, tu rama principal y `/ (root)`. Mantén `.nojekyll`. Abre `https://TU_USUARIO.github.io/PERSUASIVE26/`. Todos los recursos e imports son relativos y funcionan bajo la ruta del repositorio, sin compilación. Usa HTTPS.
+> Based on the information provided, the system considers this profile more consistent with ADHD-related characteristics than ASD-related characteristics.
 
-Antes de reclutar, revisa el consentimiento conforme a tu protocolo e incorpora los datos institucionales, contacto del equipo, política de conservación y aprobación ética que correspondan. No se han inventado esos datos. Comprueba también las políticas de logs de los proveedores de alojamiento.
+Y el aviso de prototipo sin validez diagnóstica. Solo XAI añade **Why did the system reach this conclusion?** y los factores calculados.
 
-## 8. Probar localmente
+El estímulo vive en `js/case.js`, separado del modelo. Para sustituir la regla por un árbol, regresión logística u otro modelo interpretable de BALIDA-AA, cambia `classifier.js`, conserva sus exports y la forma de los factores `{feature, value, contribution, text}`, y actualiza `CLASSIFIER_VERSION`. El receptor no reproduce ni vuelve a entrenar el modelo. El contrato del estímulo actual exige un resultado `ADHD_RELATED`: la interfaz se detiene si un modelo nuevo lo contradice, para no mostrar un texto incoherente. Un cambio de resultado o diseño requiere revisar el protocolo y su versión.
+
+## Cuestionario
+
+Los 13 ítems originales se conservan en `js/questionnaire.js` y se renderizan como grupos de radios con labels y legends. Escala 1–7: **Strongly disagree → Strongly agree**. Submit permanece deshabilitado hasta completar todos.
+
+| Constructo documentado para el equipo investigador | Ítems |
+| --- | --- |
+| Acceptance / persuasion | A1, A2, A3, A4 |
+| Trust | T1, T2 |
+| Transparency | TR1, TR2 |
+| Responsible persuasion | RP1, RP2, RP3 |
+| Usefulness | U1 |
+| Manipulation check | MC1 |
+
+## Datos guardados
+
+Cada envío válido añade una fila a `experiment_responses`. Las **35 columnas**, en orden, son:
+
+```text
+server_received_at, submission_id, participant_id, session_id,
+created_at, submitted_at_client, condition,
+experiment_version, case_version, classifier_version,
+pre_ai_judgement, post_ai_judgement, classification, duration_seconds,
+feature_attention, feature_distractibility, feature_impulsivity,
+feature_changes, feature_social_communication, feature_repetitive_behaviours,
+a1, a2, a3, a4, t1, t2, tr1, tr2, rp1, rp2, rp3, u1, mc1,
+explanation_factors_json, test_mode
+```
+
+`participant_id`, `session_id` y `submission_id` son UUID v4 generados con `crypto.randomUUID()`. Se guardan, junto con condición, paso, pre/post, respuestas y versiones, en una única entrada de `localStorage`. Se conserva la clave estable `hci_experiment_v1` para detectar estados anteriores; el contenido se identifica mediante `experiment_version = '2.0.0'`. Un estado corrupto o incompatible ofrece limpiar el borrador y volver al consentimiento; no deja la pantalla vacía ni elimina la protección local de finalización.
+
+`created_at` y `submitted_at_client` se generan en el navegador como ISO UTC; `server_received_at` lo genera Apps Script al recibir la petición. Los dos primeros y `duration_seconds` dependen del reloj del dispositivo, no son timestamps de servidor. La duración incluye pausas y pestañas cerradas y termina en el primer intento configurado de envío. Se conservan los mismos tiempos y el mismo payload en cada reintento. `test_mode` permite excluir pilotos.
+
+Apps Script valida campos permitidos, UUID, condiciones, versiones, timestamps, duración, estímulo fijo, enteros pre/post y Likert 1–7, y estructura de factores. Rechaza datos inválidos sin añadir fila. No evalúa la validez clínica ni puede probar que los datos del navegador no hayan sido manipulados.
+
+La detección de `submission_id` y `appendRow` se ejecutan bajo un único `LockService.getScriptLock()`, con `flush()` antes de liberar el bloqueo. El primer envío válido prevalece; repetir su ID no añade ni sobrescribe una fila. Mantén un único proyecto de Apps Script escritor de esta hoja y no borres las filas originales mientras necesites esa deduplicación. [Lock Service de Google](https://developers.google.com/apps-script/reference/lock).
+
+## Envío y confirmación: limitación importante
+
+`js/submission.js` envía JSON en un POST con `Content-Type: text/plain;charset=UTF-8`, `mode: 'no-cors'` y sin credenciales. El tipo de contenido evita una petición de preflight; `doPost(e)` lee `e.postData.contents`. Se siguen las redirecciones de Content Service. [Web Apps](https://developers.google.com/apps-script/guides/web), [Content Service y redirecciones](https://developers.google.com/apps-script/guides/content).
+
+**El navegador no puede inspeccionar la respuesta del servidor y, por tanto, no puede confirmar directamente que la fila se haya escrito correctamente.** Que `fetch` resuelva tampoco garantiza una escritura: podría haber un error de validación, permisos, configuración o cuotas. Es una respuesta opaca. [Modo `no-cors`](https://developer.mozilla.org/en-US/docs/Web/API/Request/mode).
+
+Por eso la pantalla final dice **Your submission has been sent**, explica que el guardado no está confirmado y ofrece **Retry the same submission**. Nunca afirma que la fila está guardada. La marca local `experiment_completed=true` evita comenzar de nuevo accidentalmente, pero no prueba recepción. Se conserva el payload final para repetirlo con el mismo `submission_id`. Si hay un fallo de red detectable, el cuestionario permanece y permite reintentar; sus respuestas quedan bloqueadas para que los reintentos sean idénticos. Comprueba las filas directamente en Sheets durante el piloto y la recogida.
+
+No hay peticiones de inicio, consulta de configuración, bloqueo remoto ni guardado parcial. Si la URL está vacía, únicamente al pulsar Submit aparece **The study data endpoint is not configured.**
+
+## Privacidad y límites
+
+La aplicación no recoge nombres, email, teléfono, geolocalización, diagnóstico real, información de salud del participante, fingerprint ni dirección IP. No utiliza cookies de seguimiento. La hoja debe permanecer privada; el acceso público será al receptor Web App, no a los resultados.
+
+Google y GitHub pueden procesar metadatos técnicos de conexión en su infraestructura. El protocolo y el consentimiento deben contemplar a esos proveedores y establecer la conservación de resultados y borradores locales. Los IDs aleatorios no garantizan por sí solos anonimato absoluto. No se escriben payloads ni identificadores en los logs del script; solo códigos genéricos de error.
+
+El endpoint es público: validación y deduplicación básica no son autenticación ni protección completa contra spam o fraude. No hay claves ocultas en el frontend. Apps Script tiene cuotas y límites de concurrencia; pueden detener ejecuciones y deben comprobarse con una prueba de carga acorde al reclutamiento. Las restricciones de una organización también pueden impedir acceso anónimo. [Cuotas oficiales](https://developers.google.com/apps-script/guides/services/quotas).
+
+## Probar en localhost
+
+Desde la raíz del repositorio:
 
 ```bash
 python3 -m http.server 8000
 ```
 
-Abre `http://localhost:8000`. Evita `file://`, que no sirve módulos ES correctamente. Puedes apuntar al endpoint alojado con localhost autorizado, preferiblemente en un proyecto de pruebas separado. Para un backend local, con Docker y la CLI:
+Abre **http://localhost:8000/**. No abras `index.html` como `file://`: Chrome bloquea los módulos en ese contexto; el inicializador muestra instrucciones de recuperación. Los errores de imports también se muestran en pantalla y en consola.
 
-```bash
-npx supabase start
-# Ejecuta schema.sql en el SQL Editor de Studio local.
-npx supabase functions serve submit-response --env-file .env --no-verify-jwt
+Con `APPS_SCRIPT_URL = ''` puedes recorrer consentimiento, Alex, pre, assessment, post y las 13 preguntas sin configurar ningún servicio. Solo fallará el envío final con el mensaje descrito.
+
+## Configurar Google Sheets y Apps Script
+
+1. Crea un Google Sheet privado para el estudio. Para pilotos, usa preferiblemente otro archivo.
+2. Desde esa hoja abre **Extensions → Apps Script**.
+3. Sustituye el contenido de `Code.gs` por `apps-script/Code.gs` de este repositorio.
+4. En **Project Settings**, activa la visualización del manifiesto `appsscript.json` y copia `apps-script/appsscript.json`. Usa V8 y zona UTC. El único permiso solicitado es trabajar con hojas de cálculo.
+5. Guarda el proyecto. Selecciona **setup** en el selector de funciones y pulsa **Run**. Autoriza la cuenta propietaria. Esta ejecución crea la pestaña `experiment_responses`, sus 35 encabezados y guarda el ID de la hoja en las propiedades del script. Puedes repetirla sin borrar filas. No ejecutes `doPost` desde ese selector: necesita una petición POST.
+6. Elige **Deploy → New deployment → Select type → Web app**.
+7. Selecciona **Execute as: Me** para escribir con los permisos del propietario.
+8. Para participantes sin cuenta Google, selecciona acceso **Anyone**, incluido acceso anónimo. Las opciones dependen de la política de la cuenta. Si tu organización no permite ese acceso, resuélvelo con su administrador o usa una cuenta institucional autorizada que lo permita; no cambies a un flujo que obligue a identificar participantes sin revisar el protocolo.
+9. Despliega y copia la **Web app URL terminada en `/exec`**, no la URL del editor ni `/dev`.
+10. Pega esa URL en `js/config.js`:
+
+```js
+export const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/DEPLOYMENT_ID/exec';
+export const TEST_MODE = false;
+export const EXPERIMENT_VERSION = '2.0.0';
+export const CASE_VERSION = 'alex_v1';
 ```
 
-Configura entonces `FUNCTION_URL` como `http://127.0.0.1:54321/functions/v1/submit-response`.
+11. Ejecuta un recorrido de prueba desde localhost y pulsa Submit. La pantalla final no constituye confirmación de almacenamiento: **abre el Sheet y comprueba que aparece una fila**, con pre/post, 13 ratings, condición y factores.
+12. Pulsa **Retry the same submission** y comprueba que sigue habiendo una sola fila para ese `submission_id`.
+13. Si no aparece la fila, revisa **Executions** en Apps Script, la ejecución de `setup`, los encabezados, el despliegue `/exec`, sus permisos y las cuotas. Códigos previstos: `invalid_payload`, `setup_required`, `header_mismatch`, `busy_retry`, `storage_error`. No cambies el orden de columnas de la pestaña de recepción; analiza copias u otras pestañas.
+14. Si modificas el código de Apps Script después del despliegue, usa **Deploy → Manage deployments → Edit → New version → Deploy**. Guardar el archivo por sí solo no actualiza la versión pública.
 
-### Modo de prueba y debug
+El propietario autoriza el script; el participante no necesita una contraseña ni una clave API. Las propiedades del script solo guardan la referencia a la hoja. El proyecto no necesita `.env`.
 
-Activa `TEST_MODE = true` en `js/config.js` y el secreto `TEST_MODE=true` en el backend de pruebas. Antes de iniciar una nueva sesión abre:
+## Activar GitHub Pages
+
+Sube los archivos actuales. En el repositorio abre **Settings → Pages → Deploy from a branch**, selecciona tu rama principal y `/ (root)`. Mantén `.nojekyll`. Abre `https://USUARIO.github.io/REPOSITORIO/` con HTTPS. Los scripts, estilos e imports usan rutas relativas; no hay build.
+
+Repite un envío desde el dominio público y verifica la fila en Sheets. Para mantener resultados privados no publiques el Google Sheet ni lo exportes dentro del repositorio.
+
+## TEST_MODE y debug
+
+La configuración entregada usa **`TEST_MODE = false`**, para no publicar controles de desarrollo por accidente. Para probar, cambia únicamente ese booleano a `true`:
 
 - `/?condition=XAI`
 - `/?condition=NO_XAI`
-- `/?debug=1` para ver participant_id, condition, classification y explanationFactors; permite reiniciar el estado local de prueba.
+- `/?debug=1`: muestra IDs, condición y resultado, y permite limpiar el estado local de prueba.
 
-Bajo Pages antepón la ruta del repositorio. Una condición forzada no reemplaza una sesión existente: reiníciala desde debug para probar otra. No hay un archivo debug independiente. La vista debug solo se construye cuando `TEST_MODE=true`; en producción el parámetro se ignora y nunca muestra esos datos. Como todo frontend público, el código se puede inspeccionar: esto es un control de interfaz, no un secreto. No publiques una copia de desarrollo como estudio de producción.
+En una subruta Pages antepón `/REPOSITORIO/`. Los parámetros de condición solo se aplican a una sesión aún no asignada; no cambian una condición existente. Usa debug para reiniciar antes de probar la otra condición. Con `TEST_MODE=false` los tres parámetros se ignoran. Devuelve el ajuste a `false` antes del estudio. Filtra `test_mode = FALSE` al analizar y conserva la versión del protocolo.
 
-Los registros de prueba llevan `test_mode=true`. Usa un proyecto separado para pilotos o exclúyelos del análisis. Antes de producción, devuelve ambos ajustes a `false` y comprueba desde un navegador limpio que los parámetros se ignoran.
+## Exportar CSV
 
-### Verificaciones reproducibles
+En Google Sheets selecciona la pestaña de respuestas y usa **File → Download → Comma-separated values (.csv, current sheet)**. Para exportar únicamente datos reales, prepara antes otra pestaña con filas `test_mode = FALSE` y `experiment_version = 2.0.0`; el CSV de una pestaña de recepción puede incluir filas ocultas o filtradas. No supongas que ocultarlas las elimina del archivo.
 
-Pruebas sin dependencias (9 casos, 3 integraciones omitidas explícitamente):
+Conserva los juicios brutos pre/post y las 13 respuestas numéricas. `explanation_factors_json` se exporta como texto JSON en una celda.
+
+## Tests y comprobación visual
+
+Sin instalar dependencias:
 
 ```bash
 node --experimental-default-type=module tests/experiment.test.mjs
 ```
 
-Para ejecutar **la misma suite completa** con navegador real y PostgreSQL de pruebas, instala herramientas solo en una carpeta temporal. No son dependencias del frontend ni necesitan build:
+Para añadir la comprobación real en Chrome a **la misma suite**, instala solo la herramienta de pruebas en `/tmp`:
 
 ```bash
-npm install --prefix /tmp/persuasive26-tools playwright@1.63.0 typescript@5.9.3 @electric-sql/pglite@0.5.8
+npm install --prefix /tmp/persuasive26-tools playwright@1.63.0
 TEST_TOOLS_DIR=/tmp/persuasive26-tools/node_modules \
 CHROME_PATH=/opt/google/chrome/chrome \
 node --experimental-default-type=module tests/experiment.test.mjs
 ```
 
-Ajusta `CHROME_PATH` a tu Chrome/Chromium. El puerto local 8000 debe estar libre. `tests/helpers.mjs` sirve los archivos actuales por HTTP, configura únicamente las respuestas de `config.js` para pruebas y ejecuta el handler real de la Edge Function, transpiliado en memoria. El transporte PostgREST se sustituye por un adaptador mínimo que ejecuta SQL real en **PGlite (PostgreSQL en WebAssembly)**. No se conecta ni escribe a Supabase alojado, y no modifica la configuración de producción en disco.
+Ajusta `CHROME_PATH` a tu Chrome/Chromium y deja libre el puerto 8000. No son dependencias de la aplicación. El arnés usa un servidor estático Python y ejecuta `Code.gs` sin modificar en un contexto JavaScript con dobles de los servicios Google. Las peticiones al receptor de prueba son interceptadas en Chrome: no se envían datos a Google. Estas pruebas no sustituyen la verificación de una fila en un despliegue real.
 
-**Resultado comprobado: 12/12 tests correctos.** Incluyen los 15.625 perfiles, explicación consistente, entrada pre/post inválida, sesión persistente, bloqueo del pre y condición, ratings inválidos, RLS/permisos, envíos concurrentes, reintento tras perder una respuesta ya guardada, migración de registros antiguos y ambos recorridos completos en Chrome.
+**Resultado verificado: 16/16 tests correctos, incluido el recorrido de Chrome.** Se revisaron visualmente las capturas de consentimiento, Alex, pre/post, los dos assessments, las 13 preguntas y la pantalla final. Sin la herramienta de navegador, se ejecutan 15 tests y se omite explícitamente el test visual.
 
-La prueba de navegador verifica y captura todas las pantallas, las 13 preguntas visibles, selección con teclado, botones obligatorios, recargas en caso/pre/assessment/cuestionario, `main` no vacío, URL sin configurar, error de red, import ausente, `file://`, estado corrupto/antiguo, subruta Pages, `TEST_MODE` y parámetros ignorados en producción. Revisa ausencia de desbordamiento horizontal a 1365×768 y 320 px. El 200 % se comprueba con CSS `zoom:2` y con el viewport CSS equivalente 682×384; no se automatiza el menú de zoom del navegador.
+La suite cubre los 15.625 perfiles posibles, explicación consistente, bloqueo local del pre, condición persistente, 13 ratings obligatorios, payload completo, IDs y reintentos, validación y deduplicación en Apps Script. El recorrido de Chrome cubre ambas condiciones, cero peticiones antes de Submit, endpoint vacío, errores de red, respuesta opaca aunque el receptor rechace la escritura, recuperación de estados, imports, subruta Pages, teclado, scroll, escritorio, móvil de 320 px y ampliación CSS al 200 %.
 
-Las capturas se generan en `tests/artifacts/` y se revisaron visualmente: consentimiento, caso, pre, NO_XAI, XAI con explicación, post, cuestionario completo y finalización. Todas las preguntas A1–A4, T1–T2, TR1–TR2, RP1–RP3, U1 y MC1 son legibles y seleccionables. Los recorridos normales no producen errores de consola; los fallos provocados deliberadamente generan diagnósticos esperados.
+Las capturas del recorrido se generan en `tests/artifacts/` y no se publican en Git. No se ha realizado una auditoría formal de accesibilidad ni una evaluación manual con lector de pantalla.
 
-La comprobación integrada local no sustituye un piloto en el dominio público con Supabase alojado. Antes de reclutar, completa el consentimiento institucional, despliega, repite ambos recorridos en el entorno real y revisa allí CORS, timestamps, exportación CSV y la política de logs. No se ha realizado una evaluación manual con lector de pantalla ni una auditoría formal de accesibilidad.
+## Preparación antes del estudio real
 
-## 9. Exportar CSV
-
-En Supabase Table Editor abre `experiment_responses`, filtra `test_mode=false` y `experiment_version=1.1.0` y utiliza Export → CSV. También puedes ejecutar en SQL Editor:
-
-```sql
-select * from public.experiment_responses
-where test_mode = false and experiment_version = '1.1.0'
-order by submitted_at;
-```
-
-Descarga el resultado como CSV. Los ítems son enteros de 1 a 7; `explanation_factors` contiene JSON. `user_agent`, `screen_width`, `screen_height` y `language` se dejan `NULL` deliberadamente: el esquema admite estos campos opcionales pero el estudio no los recopila.
-
-## Activar o desactivar el hash sin cambiar código
-
-Por defecto `STORE_IP_HASH=false`: la función no lee ninguna cabecera IP. Para activarlo, verifica primero qué cabecera de un solo valor sobrescribe tu gateway con la IP real. No uses una cabecera controlable por el cliente ni el primer elemento de una cadena `X-Forwarded-For` sin una política de confianza comprobada. Esta implementación falla de forma explícita ante cabeceras vacías o con múltiples valores.
-
-Genera un salt con `openssl rand -hex 32`, guárdalo en `.env` como `IP_HASH_SALT` y configura la cabecera verificada en `TRUSTED_IP_HEADER`. Después:
-
-```bash
-npx supabase secrets set --env-file .env
-npx supabase secrets set STORE_IP_HASH=true
-```
-
-No requiere modificar código. La pantalla de consentimiento consulta el ajuste al pulsar el botón de aceptación, sin bloquear su renderizado inicial; si se activa el hash, exige aceptación adicional antes de crear la sesión. Cambia esta política entre periodos de recogida, sin participantes activos, para que el consentimiento coincida con la política aplicada al envío.
-
-La función calcula SHA-256(IP + SALT) y almacena únicamente `ip_hash`; nunca devuelve la IP al frontend ni escribe `raw_ip`. No se registran cuerpos ni cabeceras en logs del código. Los proveedores pueden procesar IP en su infraestructura; esta aplicación no puede prometer que sus logs no las conserven. El hash sigue siendo un dato seudónimo; IP compartidas y cambios de red limitan su utilidad. Distintas representaciones IPv6 podrían producir hashes diferentes.
-
-Para detectar repeticiones sin bloquear:
-
-```sql
-select ip_hash, count(*) from public.experiment_responses
-where ip_hash is not null and test_mode = false
-group by ip_hash having count(*) > 1;
-```
-
-El bloqueo solo se activa con `BLOCK_DUPLICATE_IP_HASH=true`. Las reservas atómicas impiden carreras concurrentes; una reserva se conserva si falla el guardado, permitiendo reintentar la misma sesión. Activar el bloqueo después de recoger respuestas no reserva hashes históricos: planifícalo antes de la recogida o realiza una migración revisada. No es una garantía antifraude.
-
-Para desactivar:
-
-```bash
-npx supabase secrets set STORE_IP_HASH=false BLOCK_DUPLICATE_IP_HASH=false
-```
-
-Esto no borra hashes históricos. Gestiona su eliminación y la de sesiones incompletas según tu protocolo de conservación. `experiment_completed=true` evita repeticiones accidentales en este navegador; borrar el almacenamiento u otro dispositivo evita ese control. El modo privado puede impedir la persistencia. Evita varias pestañas simultáneas al iniciar: localStorage no ofrece una transacción entre pestañas, aunque el backend fija de forma inmutable el primer juicio y asignación registrados para cada sesión.
+Completa el consentimiento institucional y el plan de conservación; revisa el clasificador provisional y el protocolo con el equipo; preespecifica análisis y exclusiones; comprueba `TEST_MODE=false`; ejecuta ambos recorridos desde Pages; confirma recepción y ausencia de duplicados directamente en Sheets; revisa límites de la cuenta y restringe acceso a los resultados. Conserva una copia versionada del frontend y del script usados en la recogida.

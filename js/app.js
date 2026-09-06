@@ -1,9 +1,10 @@
-import { TEST_MODE, FUNCTION_URL } from './config.js';
-import { FEATURE_KEYS, FREQUENCIES, CASE_FEATURES, classifyProfile, explainClassification, CLASSIFIER_VERSION } from './classifier.js';
-import { QUESTIONS, questionnaireMarkup } from './questionnaire.js';
+import { TEST_MODE, APPS_SCRIPT_URL } from './config.js';
+import { FEATURE_KEYS, FREQUENCIES, CASE_FEATURES } from './case.js';
+import { classifyProfile, explainClassification } from './classifier.js';
+import { QUESTIONS, questionnaireMarkup, isJudgement } from './questionnaire.js';
 import { loadSession, saveSession, isCompleted, completeSession, clearTestSession, clearSession, SessionStateError } from './storage.js';
-import { api, beginSession, sessionRequest, lockPreJudgement, syncSession } from './experiment.js';
-import { isJudgement } from '../supabase/functions/_shared/protocol.js';
+import { beginSession, lockPreJudgement } from './experiment.js';
+import { buildSubmissionPayload, sendSubmission } from './submission.js';
 const main = document.querySelector('main');
 let session;
 const assessment = 'Based on the information provided, the system considers this profile more consistent with ADHD-related characteristics than ASD-related characteristics.';
@@ -19,22 +20,13 @@ function error(err) {
 }
 // PROVISIONAL CONSENT: institutional details and retention policy require review.
 function consent() {
- show(`<div class="eyebrow">Research Study</div><h1>Information and consent</h1><div class="card"><p>This academic study explores human–AI interaction. You will read a fictional case, evaluate information produced by an experimental AI system, and answer questions about your own judgement.</p><p>The system does not provide a clinical diagnosis. Participation is voluntary. You may stop at any point by closing this page. Your initial judgement is saved before the AI assessment; your final questionnaire is saved when you submit it.</p><p>We store random session identifiers, your study responses and timing. Draft responses remain in this browser so you can resume. We do not request names, contact details or location, and do not use fingerprinting.</p><p id="privacy">Study records do not store your full IP address. If connection hashing is enabled, we will show additional information before you begin. Hosting providers may retain their own connection logs.</p><form id="consent-form"><label class="consent-check"><input type="checkbox" required id="consent-check"> I have read this information and voluntarily agree to participate.</label><div class="actions"><button id="agree">I agree to participate</button></div></form></div>`,1);
- document.querySelector('#consent-form').onsubmit = async event => {
-  event.preventDefault(); const button = document.querySelector('#agree'); button.disabled = true;
-  try {
-   const settings = await api({action:'config'});
-   if(settings.ipHashEnabled && !document.querySelector('#hash-consent')) {
-    document.querySelector('#privacy').textContent = 'The server temporarily processes your IP to create a salted SHA-256 hash for duplicate detection. Only this pseudonymous hash is stored in study records. The application discards the original IP. Hosting providers may retain their own connection logs.';
-    const label=document.createElement('label'); label.className='consent-check';
-    const checkbox=document.createElement('input'); checkbox.type='checkbox'; checkbox.required=true; checkbox.id='hash-consent';
-    label.append(checkbox,document.createTextNode(' I agree to participation with the connection hashing described above.'));
-    button.closest('.actions').before(label); checkbox.focus(); button.disabled=false; return;
-   }
-   session=await beginSession(); render();
-  } catch(err) { error(err); button.disabled=false; }
+ show(`<div class="eyebrow">Research Study</div><h1>Information and consent</h1><div class="card"><p>This academic study explores human–AI interaction. You will read a fictional case, evaluate information produced by an experimental AI system, and answer questions about your own judgement.</p><p>The system does not provide a clinical diagnosis. Participation is voluntary. You may stop at any point by closing this page. Your progress stays on this device until you press Submit responses at the end of the study.</p><p>We store random session identifiers, your study responses and timing. Draft responses remain in this browser so you can resume. A copy of your final submission remains here to allow a retry. We do not request names, contact details or location, and do not use fingerprinting.</p><p id="privacy">The application does not collect your IP address or information about your own health. Google and GitHub may process technical connection metadata in their hosting infrastructure.</p><form id="consent-form"><label class="consent-check"><input type="checkbox" required id="consent-check"> I have read this information and voluntarily agree to participate.</label><div class="actions"><button id="agree">I agree to participate</button></div></form></div>`,1);
+ document.querySelector('#consent-form').onsubmit = event => {
+  event.preventDefault();
+  try { session=beginSession(); render(); } catch(err) { error(err); }
  };
 }
+
 const caseLabels = ['Difficulty sustaining attention during long tasks', 'Easily distracted by external stimuli', 'Impulsive responding', 'Difficulty dealing with unexpected changes', 'Difficulty interpreting social cues', 'Repetitive behaviours or interests'];
 function casePage() {
  show(`<h1>Fictional case: Alex</h1><p>Please imagine that the following information refers to a fictional individual named Alex.</p><p>The system shown in this study is intended for research on AI-assisted interpretation and does not provide a clinical diagnosis.</p><div class="card"><dl class="case-grid">${FEATURE_KEYS.map((k,i) => `<dt>${caseLabels[i]}</dt><dd>${FREQUENCIES[CASE_FEATURES[k]]}</dd>`).join('')}</dl></div><div class="actions"><button id="next">Continue</button></div>`,2);
@@ -57,13 +49,14 @@ function judgementPage(kind) {
   event.preventDefault(); button.disabled=true;
   try {
    if(!isJudgement(session[key]))throw new Error('Please choose a value from 1 to 7.');
-   if(pre){await lockPreJudgement(session); render();}else advance('questionnaire');
+   if(pre){lockPreJudgement(session); render();}else advance('questionnaire');
   }catch(err){error(err);button.disabled=false;}
  };
 }
 function assessmentPage() {
  const result = classifyProfile(CASE_FEATURES);
- const factors = explainClassification(CASE_FEATURES, result.classification);
+ if(result.classification !== 'ADHD_RELATED') throw new Error('The research model does not match this study stimulus. Please contact the researcher.');
+ const factors = explainClassification(CASE_FEATURES, result);
  show(`<h1>AI-assisted assessment</h1><div class="card"><p id="assessment-text">${assessment}</p><p class="note">This output is generated by an experimental research prototype and should not be interpreted as a clinical diagnosis.</p>${session.condition === 'XAI' ? `<section id="explanation"><h2>Why did the system reach this conclusion?</h2><ul>${factors.map(f => `<li>${f.text}</li>`).join('')}</ul></section>` : ''}</div><div class="actions"><button id="next">Continue</button></div>`,4);
  document.querySelector('#next').onclick = () => advance('post');
 }
@@ -73,28 +66,42 @@ function questionnairePage() {
  const complete = () => QUESTIONS.every(([k]) => isJudgement(session.answers[k]));
  const updateSubmit = () => {document.querySelector('#submit').disabled = !complete();};
  updateSubmit();
+ if(session.final_payload)form.querySelectorAll('input').forEach(input=>input.disabled=true);
  form.onchange = () => {try {session.answers = Object.fromEntries([...new FormData(form)].map(([k,v]) => [k,Number(v)])); saveSession(session);updateSubmit();}catch(err){error(err);}};
  form.onsubmit = async event => {
-  event.preventDefault(); const button = document.querySelector('#submit'); button.disabled = true; button.textContent='Saving…';
+  event.preventDefault(); const button = document.querySelector('#submit'); button.disabled = true; button.textContent='Sending…';
   try {
    if(QUESTIONS.some(([k]) => !Number.isInteger(session.answers[k]) || session.answers[k]<1 || session.answers[k]>7)) throw new Error('Please answer every statement.');
-   await api({...sessionRequest(session,'submit'), condition:session.condition, features:{...CASE_FEATURES}, answers:session.answers, pre_ai_judgement:session.pre_ai_judgement, post_ai_judgement:session.post_ai_judgement, classifier_version:CLASSIFIER_VERSION});
-   completeSession(); finished();
+   if(!APPS_SCRIPT_URL)throw new Error('The study data endpoint is not configured.');
+   session.final_payload ??= buildSubmissionPayload(session);
+   saveSession(session);
+   // Retries always use the same payload, timestamps and submission_id.
+   form.querySelectorAll('input').forEach(input=>input.disabled=true);
+   await sendSubmission(session.final_payload);
+   completeSession(session); finished();
   } catch(err) {error(err); button.disabled=false; button.textContent='Submit responses';}
  };
 }
-function finished() {show('<div class="eyebrow">STUDY COMPLETE</div><h1>Thank you for taking part.</h1><div class="card"><h2>Your responses have been saved.</h2><p>Your perspective contributes to research on how people interpret AI-assisted information. You may now close this page.</p><p>This study used a fictional profile and a simple research classifier. Its assessment has no clinical validity.</p></div>');}
+function finished() {
+ show('<div class="eyebrow">STUDY COMPLETE</div><h1>Thank you for taking part.</h1><div class="card"><h2>Your submission has been sent.</h2><p>This page cannot confirm whether your responses were saved. You may retry the same submission without creating a duplicate.</p><div class="actions"><button class="secondary" id="retry-submission">Retry the same submission</button></div><p>Your perspective contributes to research on how people interpret AI-assisted information. You may now close this page.</p><p>This study used a fictional profile and a simple research classifier. Its assessment has no clinical validity.</p></div>');
+ document.querySelector('#retry-submission').onclick=async event=>{
+  const button=event.target;button.disabled=true;
+  try {await sendSubmission(session.final_payload);finished();}catch(err){error(err);button.disabled=false;}
+ };
+}
+function alreadyCompleted() {show('<h1>You have already completed this study.</h1><p>Thank you for your participation. You may close this page.</p>');}
 function render() {
  if(session.test_mode !== TEST_MODE) throw new Error('Study settings have changed. Please contact the researcher.');
  if(session.pre_locked && ['case','pre'].includes(session.step)) session.step='assessment';
- const screens = {case:casePage, pre:()=>judgementPage('pre'), assessment:assessmentPage, post:()=>judgementPage('post'), questionnaire:questionnairePage};
+ const screens = {case:casePage, pre:()=>judgementPage('pre'), assessment:assessmentPage, post:()=>judgementPage('post'), questionnaire:questionnairePage, complete:finished};
  if(!screens[session.step]) throw new SessionStateError('The saved study step is invalid.');
  screens[session.step]();
 }
 function debug() {
  show('<h1>Development debug</h1><pre id="debug"></pre><button id="reset">Reset local test session</button>');
- const s=loadSession(); let result=null; try {result=classifyProfile(s?.features);} catch {}
- document.querySelector('#debug').textContent=JSON.stringify({participant_id:s?.participant_id,condition:s?.condition,classification:result?.classification,explanationFactors:result?.explanationFactors},null,2);
+ let s=null; try{s=loadSession();}catch(err){console.error('Saved test state could not be loaded:',err);}
+ let result=null; try {result=classifyProfile(s?.features);} catch {}
+ document.querySelector('#debug').textContent=JSON.stringify({participant_id:s?.participant_id,submission_id:s?.submission_id,condition:s?.condition,classification:result?.classification,explanationFactors:result?.explanationFactors},null,2);
  document.querySelector('#reset').onclick=()=>{clearTestSession();location.href='./';};
 }
 function recover(err) {
@@ -103,23 +110,21 @@ function recover(err) {
  error(err);
  document.querySelector('#recover').onclick=()=>{try{clearSession();session=null;consent();}catch(error){recover(error);}};
 }
-async function resume() {
- show('<h1>Resuming your study</h1><p>Checking your saved progress…</p>');
- try { if(await syncSession(session)){completeSession();finished();}else render(); }
- catch(err){show('<h1>Your progress is saved on this device</h1><p>We could not verify the saved session. Please retry to continue.</p><button id="retry">Retry</button>');error(err);document.querySelector('#retry').onclick=resume;}
-}
-export async function initialize() {
+export function initialize() {
  if (!main) throw new Error('Missing #main element');
- if (typeof TEST_MODE !== 'boolean' || typeof FUNCTION_URL !== 'string') throw new Error('Invalid public study configuration');
+ if (typeof TEST_MODE !== 'boolean' || typeof APPS_SCRIPT_URL !== 'string') throw new Error('Invalid public study configuration');
  try {
-  // Consent needs neither working storage nor a configured backend to render.
   if(TEST_MODE && new URLSearchParams(location.search).get('debug')==='1'){debug();return;}
-  if(isCompleted()){show('<h1>You have already completed this study.</h1><p>Thank you for your participation. You may close this page.</p>');return;}
-  session=loadSession();
-  if(session?.registered) await resume(); else consent();
+  const completed=isCompleted();
+  try {session=loadSession();} catch(err){if(completed){console.error('Saved completed draft unavailable:',err);alreadyCompleted();return;}throw err;}
+  if(completed){if(session?.step==='complete')finished();else alreadyCompleted();return;}
+  if(session)render();else consent();
  }catch(err){if(err instanceof SessionStateError)recover(err);else{consent();error(err);}}
 }
 // An uncaught event-handler failure must remain visible and diagnosable.
 window.addEventListener('error',event=>{if(event.error)error(event.error);});
 window.addEventListener('unhandledrejection',event=>error(event.reason instanceof Error?event.reason:new Error(String(event.reason))));
 window.addEventListener('pageshow',event=>{if(event.persisted)initialize();});
+
+// Refresh stale tabs without network calls, including after a local pre lock.
+window.addEventListener('storage',event=>{if(['hci_experiment_v1','experiment_completed'].includes(event.key))initialize();});

@@ -1,82 +1,46 @@
-// Optional integration tooling lives outside the app; set TEST_TOOLS_DIR to its node_modules.
-import fs from 'node:fs/promises';
+// Test-only service doubles: production is static files plus the Google Web App.
+import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import http from 'node:http';
-import { webcrypto } from 'node:crypto';
-export const root = path.resolve(new URL('..', import.meta.url).pathname);
+import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
+import { spawn } from 'node:child_process';
+export const root = fileURLToPath(new URL('..',import.meta.url));
 export const toolsDir = process.env.TEST_TOOLS_DIR;
-export async function createHarness() {
-  const { PGlite } = await import(pathToFileURL(path.join(toolsDir,'@electric-sql/pglite/dist/index.js')));
-  const { default: ts } = await import(pathToFileURL(path.join(toolsDir,'typescript/lib/typescript.js')));
-  const database = new PGlite();
-  await database.exec('create role anon; create role authenticated; create role service_role;');
-  await database.exec(await fs.readFile(path.join(root,'supabase/schema.sql'),'utf8'));
-  const originalFetch=globalThis.fetch;
-  const settings={SUPABASE_URL:'http://database.test',SUPABASE_SERVICE_ROLE_KEY:'test-only',ALLOWED_ORIGINS:'http://127.0.0.1:8000',TEST_MODE:'true',RATE_LIMIT_PER_MINUTE:'10000'};
-  const previousDeno=globalThis.Deno;
-  globalThis.crypto ??= webcrypto;
-  let handler;
-  globalThis.Deno={env:{get:key=>settings[key]},serve:fn=>{handler=fn;}};
-  // A minimal PostgREST transport backed by real PostgreSQL (PGlite), not canned API results.
-  globalThis.fetch=async (url,options={})=>{
-    if(!String(url).startsWith(settings.SUPABASE_URL))return originalFetch(url,options);
-    const parsed=new URL(url); const resource=parsed.pathname.replace('/rest/v1/','');
-    const body=options.body?JSON.parse(options.body):undefined;
-    try {
-      let rows;
-      if(resource.startsWith('rpc/')) {
-        const fn=resource.slice(4);
-        if(fn==='consume_experiment_rate_limit'){
-          const result=await database.query('select consume_experiment_rate_limit($1) as allowed',[body.max_requests]);
-          return Response.json(result.rows[0].allowed);
-        }
-        rows=(await database.query('select * from lock_experiment_pre($1,$2,$3,$4)',[body.p_session_id,body.p_token_hash,body.p_pre,body.p_condition])).rows;
-      } else {
-        if(!/^experiment_[a-z_]+$/.test(resource))throw new Error('Invalid test resource');
-        if(options.method==='POST') {
-          const keys=Object.keys(body);const values=Object.values(body).map(v=>v!==null&&typeof v==='object'?JSON.stringify(v):v);
-          rows=(await database.query(`insert into ${resource} (${keys.join(',')}) values (${keys.map((_,i)=>`$${i+1}`).join(',')}) returning *`,values)).rows;
-        } else {
-          const filters=[...parsed.searchParams].filter(([k])=>k!=='select');
-          const values=filters.map(([,v])=>v.replace(/^eq\./,''));
-          const where=filters.length?' where '+filters.map(([k],i)=>`${k}=$${i+1}`).join(' and '):'';
-          const select=parsed.searchParams.get('select')||'*';
-          rows=(await database.query(`select ${select} from ${resource}${where}`,values)).rows;
-        }
-      }
-      return Response.json(rows);
-    }catch(error){return Response.json({error:error.message},{status:error.code==='23505'?409:400});}
+export function createHarness({setup=true}={}) {
+  const rows=[],events=[],logs=[];
+  const state={held:false,busy:false,failWrite:false,columns:26};
+  const properties=new Map();
+  const lock={
+    tryLock(){events.push('lock');if(state.busy)return false;state.held=true;return true;},
+    waitLock(){if(!this.tryLock())throw new Error('busy_retry');},
+    hasLock(){return state.held;},releaseLock(){events.push('release');state.held=false;}
   };
-  let source=await fs.readFile(path.join(root,'supabase/functions/submit-response/index.ts'),'utf8');
-  source=source.replaceAll("'../_shared/",`'${pathToFileURL(path.join(root,'supabase/functions/_shared/')).href}`);
-  const compiled=ts.transpileModule(source,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022},reportDiagnostics:true});
-  if(compiled.diagnostics.length)throw new Error('TypeScript transpilation diagnostics');
-  await import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString('base64')}#${crypto.randomUUID()}`);
-  const call=async body=>{
-    const response=await handler(new Request('http://function.test',{method:'POST',headers:{Origin:settings.ALLOWED_ORIGINS,'Content-Type':'application/json'},body:JSON.stringify(body)}));
-    return {status:response.status,body:await response.json()};
+  const sheet={
+    getLastRow:()=>rows.length,getMaxColumns:()=>state.columns,
+    insertColumnsAfter:(_,count)=>{state.columns+=count;},setFrozenRows:()=>{},
+    appendRow(row){if(!state.held)throw new Error('Write outside lock');if(state.failWrite)throw new Error('Simulated Sheets write error');events.push('append');rows.push([...row]);},
+    getRange(row,column,height,width){return {
+      getValues:()=>Array.from({length:height},(_,r)=>Array.from({length:width},(_,c)=>rows[row-1+r]?.[column-1+c]??'')),
+      createTextFinder(text){return {matchEntireCell(){return this;},matchCase(){return this;},useRegularExpression(){return this;},findNext(){events.push('find');if(!state.held)throw new Error('Duplicate check outside lock');return rows.slice(row-1,row-1+height).some(r=>String(r[column-1]).toLowerCase()===text.toLowerCase())?{}:null;}}}
+    };}
   };
-  return {database,settings,call,handler,async close(){globalThis.fetch=originalFetch;globalThis.Deno=previousDeno;await database.close();}};
-}
-export async function serveApp(harness) {
-  const server=http.createServer(async(req,res)=>{
-    try {
-      if(req.url==='/api') {
-        const chunks=[];for await(const chunk of req)chunks.push(chunk);
-        const response=await harness.handler(new Request('http://127.0.0.1:8000/api',{method:req.method,headers:req.headers,body:Buffer.concat(chunks)}));
-        res.writeHead(response.status,Object.fromEntries(response.headers));res.end(await response.text());return;
-      }
-      let filename=decodeURIComponent(req.url.split('?')[0]).replace(/^\/PERSUASIVE26\//,'/');
-      if(filename.endsWith('/'))filename+='index.html';
-      filename=path.join(root,filename);
-      if(!filename.startsWith(root+path.sep)){res.writeHead(403);res.end();return;}
-      let content=await fs.readFile(filename);
-      if(filename.endsWith('/js/config.js')) content=Buffer.from(content.toString().replace("export const FUNCTION_URL = '';",`export const FUNCTION_URL = '${harness.frontendURL ?? 'http://127.0.0.1:8000/api'}';`).replace('export const TEST_MODE = false;',`export const TEST_MODE = ${harness.settings.TEST_MODE};`));
-      res.setHeader('Content-Type',filename.endsWith('.js')?'text/javascript':filename.endsWith('.css')?'text/css':'text/html');
-      res.end(content);
-    }catch{res.writeHead(404);res.end('Not found');}
+  const spreadsheet={getSheetByName:()=>sheet,insertSheet:()=>sheet,getId:()=>'private-test-sheet'};
+  const context=vm.createContext({
+    console:{error:message=>logs.push(message)},
+    SpreadsheetApp:{getActiveSpreadsheet:()=>spreadsheet,openById:()=>spreadsheet,flush:()=>events.push('flush')},
+    PropertiesService:{getScriptProperties:()=>({getProperty:key=>properties.get(key),setProperty:(key,value)=>properties.set(key,value)})},
+    LockService:{getScriptLock:()=>lock},
+    ContentService:{MimeType:{JSON:'application/json'},createTextOutput:text=>({text,setMimeType(){return this;}})}
   });
-  await new Promise(resolve=>server.listen(8000,'127.0.0.1',resolve));
-  return {close:()=>new Promise(resolve=>server.close(resolve))};
+  vm.runInContext(fs.readFileSync(path.join(root,'apps-script/Code.gs'),'utf8'),context);
+  if(setup)context.setup();
+  return {context,rows,events,logs,state,headers:JSON.parse(vm.runInContext('JSON.stringify(HEADERS)',context)),call:payload=>JSON.parse(context.doPost({postData:{contents:JSON.stringify(payload)}}).text),raw:body=>JSON.parse(context.doPost({postData:{contents:body}}).text)};
+}
+export async function serveApp() {
+  // Use the same Python static server as local development, with a Pages subpath alias.
+  const code=`import http.server,sys\nclass Handler(http.server.SimpleHTTPRequestHandler):\n def do_GET(self):\n  if self.path.startswith('/PERSUASIVE26/'):\n   self.path=self.path[len('/PERSUASIVE26'):]\n  super().do_GET()\n def log_message(self,*args): pass\nserver=http.server.ThreadingHTTPServer(('127.0.0.1',8000),Handler)\nprint('ready',flush=True)\nserver.serve_forever()`;
+  const child=spawn('python3',['-u','-c',code],{cwd:root,stdio:['ignore','pipe','pipe']});
+  let stderr='';child.stderr.on('data',data=>stderr+=data);
+  await new Promise((resolve,reject)=>{child.stdout.once('data',()=>resolve());child.once('error',reject);child.once('exit',()=>reject(new Error(stderr||'Static server exited')));});
+  return {close:()=>new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGTERM');})};
 }
